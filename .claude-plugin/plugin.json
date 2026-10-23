@@ -1,1 +1,10 @@
-{ "name": "git-issues", "version": "0.4.0", "description": "Pane listing the open issues of the current project (number, title, last updated) from GitLab, or from GitHub when the default remote is hosted there, filterable by including or excluding labels", "types": "./types/index.d.ts" }
+{
+  "name": "git-issues",
+  "version": "0.4.0",
+  "description": "Pane listing the open issues of the current project (number, title, last updated) from GitLab, or from GitHub when the default remote is hosted there, filterable by including or excluding labels",
+  "author": {
+    "name": "David DE ANDRES HERNANDEZ"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

@@ -1,5 +1,13 @@
 {
   "name": "davideandres95",
-  "owner": { "name": "davideandres95" },
-  "plugins": [{ "name": "git-issues", "source": "./" }]
+  "owner": {
+    "name": "davideandres95"
+  },
+  "description": "Claude Code mods by davideandres95",
+  "plugins": [
+    {
+      "name": "git-issues",
+      "source": "./"
+    }
+  ]
 }
