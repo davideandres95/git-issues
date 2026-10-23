@@ -1,13 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Issue, IssueList, IssueSource, LabelFilter } from '../types'
+import type { Issue, IssueList, IssuePreview, IssueSource, LabelFilter } from '../types'
 
 const PANE = 'git-issues'
 const REFRESH_MS = 5 * 60 * 1000
 const NO_FILTER: LabelFilter = { include: [], exclude: [] }
 const list = atom({ plugin: 'git-issues', key: 'list' } as const, { issues: [] } as IssueList)
 const filter = atom({ plugin: 'git-issues', key: 'filter' } as const, NO_FILTER)
+const NO_PREVIEW: IssuePreview = { isExpanded: false }
+const preview = atom({ plugin: 'git-issues', key: 'preview' } as const, NO_PREVIEW)
 
 type Fetched = { issues: Issue[] } | { error: string }
 
@@ -49,9 +51,21 @@ async function fromGitLab($: EngineInterface): Promise<Fetched> {
   const ran = await run($, ['glab', 'issue', 'list', '--opened', '-O', 'json', '-P', '100', '--order', 'updated_at'])
   if (ran.exitCode !== 0) return { error: lastLine(ran.stderr) || `glab exited ${ran.exitCode}` }
   try {
-    const raw = JSON.parse(ran.stdout) as { iid: number; title: string; updated_at: string; labels?: string[] }[]
+    const raw = JSON.parse(ran.stdout) as {
+      iid: number
+      title: string
+      updated_at: string
+      labels?: string[]
+      description?: string | null
+    }[]
     return {
-      issues: raw.map(i => ({ iid: i.iid, title: i.title, updatedAt: i.updated_at, labels: i.labels ?? [] })),
+      issues: raw.map(i => ({
+        iid: i.iid,
+        title: i.title,
+        updatedAt: i.updated_at,
+        labels: i.labels ?? [],
+        description: i.description ?? '',
+      })),
     }
   } catch {
     return { error: 'could not parse glab output' }
@@ -63,17 +77,24 @@ async function fromGitLab($: EngineInterface): Promise<Fetched> {
 async function fromGitHub($: EngineInterface, repo: string): Promise<Fetched> {
   const gh = await run($, [
     'gh', 'issue', 'list', '-R', repo, '--state', 'open', '--limit', '100',
-    '--json', 'number,title,updatedAt,labels',
+    '--json', 'number,title,updatedAt,labels,body',
   ])
   if (gh.exitCode === 0) {
     try {
-      const raw = JSON.parse(gh.stdout) as { number: number; title: string; updatedAt: string; labels?: { name: string }[] }[]
+      const raw = JSON.parse(gh.stdout) as {
+        number: number
+        title: string
+        updatedAt: string
+        labels?: { name: string }[]
+        body?: string | null
+      }[]
       return {
         issues: raw.map(i => ({
           iid: i.number,
           title: i.title,
           updatedAt: i.updatedAt,
           labels: (i.labels ?? []).map(l => l.name),
+          description: i.body ?? '',
         })),
       }
     } catch {
@@ -106,6 +127,7 @@ async function fromGitHub($: EngineInterface, repo: string): Promise<Fetched> {
       title: string
       updated_at: string
       labels?: ({ name: string } | string)[]
+      body?: string | null
       pull_request?: unknown
     }[]
     return {
@@ -116,6 +138,7 @@ async function fromGitHub($: EngineInterface, repo: string): Promise<Fetched> {
           title: i.title,
           updatedAt: i.updated_at,
           labels: (i.labels ?? []).map(l => (typeof l === 'string' ? l : l.name)),
+          description: i.body ?? '',
         })),
     }
   } catch {
@@ -168,6 +191,35 @@ function describe({ include, exclude }: LabelFilter): string {
     exclude.length > 0 && `without ${exclude.join(', ')}`,
   ].filter(Boolean)
   return parts.length > 0 ? ` ${parts.join(', ')}` : ''
+}
+
+// Rows `text` takes at `columns` cells, a line at least one.
+function rowsOf(line: string, columns: number): number {
+  return Math.max(1, Math.ceil(line.length / columns))
+}
+
+// The text cut to `rows` rows of `columns` cells, ending in an ellipsis where it was cut.
+function clip(text: string, rows: number, columns: number): { text: string; isCut: boolean } {
+  const lines = text.replace(/\r\n?/g, '\n').trim().split('\n')
+  const kept: string[] = []
+  let left = rows
+  for (const line of lines) {
+    const need = rowsOf(line, columns)
+    if (need <= left) {
+      kept.push(line)
+      left -= need
+      continue
+    }
+    if (left > 0) {
+      kept.push(`${line.slice(0, left * columns - 1).trimEnd()}…`)
+    } else {
+      // No row left: the ellipsis goes on the last kept line, in a cell of its own when one is free.
+      const last = kept.pop() ?? ''
+      kept.push(`${last.length % columns === 0 && last.length > 0 ? last.slice(0, -1) : last}…`)
+    }
+    return { text: kept.join('\n'), isCut: true }
+  }
+  return { text: kept.join('\n'), isCut: false }
 }
 
 function ago(iso: string): string {
@@ -233,7 +285,35 @@ export const register: Register = on => {
     }
     const isFiltered = active.include.length + active.exclude.length > 0
     const issues = all.filter(i => matches(i, active))
-    const room = Math.max(1, (e.viewport?.rows ?? 24) - 6)
+    const { iid: openIid, isExpanded } = await read($, preview)
+    // The open issue stays shown while the filter hides it from the list; one that closed drops out.
+    const open = all.find(i => i.iid === openIid)
+
+    // Rows left for the list (and the preview) under the status row, the label toggles and an error.
+    // Word wrap can take a row more than counted here; the pane then scrolls.
+    const columns = Math.max(20, e.props.bodyColumns)
+    const labelRows = labels.length > 0 ? rowsOf(labels.map(l => `[ ] ${l}  `).join(''), columns) : 0
+    const room = Math.max(4, e.props.scroll.bodyRows - 1 - labelRows - (error ? 1 : 0))
+    // With a preview open the list keeps the upper half, the preview the lower one.
+    const listRows = open ? Math.max(2, Math.floor(room / 2)) : room
+    const previewRows = room - listRows
+    const fits = issues.length <= listRows
+    const shownCount = fits ? issues.length : Math.max(1, listRows - 1)
+    // Scrolled so the open issue stays in view.
+    const at = open ? issues.indexOf(open) : -1
+    const start = at >= shownCount ? at - shownCount + 1 : 0
+    const shown = issues.slice(start, start + shownCount)
+
+    const toggle = (iid: number) =>
+      void update($, preview, p => (p.iid === iid ? NO_PREVIEW : { iid, isExpanded: false }))
+    const close = () => void update($, preview, () => NO_PREVIEW)
+
+    // The preview's rows: a rule, the title, the labels, the description and its Show more.
+    const descriptionRows = Math.max(2, previewRows - 3 - (open && open.labels.length > 0 ? 1 : 0))
+    const description = open?.description?.trim() ?? ''
+    const clipped = isExpanded
+      ? { text: description, isCut: false }
+      : clip(description, descriptionRows, Math.max(10, columns - 2))
 
     return (
       <Box flexDirection="column">
@@ -275,13 +355,46 @@ export const register: Register = on => {
           })}
         </Box>
         {error && <Text color="red">{error}</Text>}
-        {issues.slice(0, room).map(issue => (
-          <Text wrap="truncate-end">
-            <Text bold>#{issue.iid}</Text> {issue.title} <Text dimColor>{ago(issue.updatedAt)}</Text>
-          </Text>
+        {shown.map(issue => (
+          <Button key={`issue:${issue.iid}`} plain onPress={() => toggle(issue.iid)}>
+            <Text wrap="truncate-end" inverse={issue.iid === openIid}>
+              <Text bold>#{issue.iid}</Text> {issue.title} <Text dimColor>{ago(issue.updatedAt)}</Text>
+            </Text>
+          </Button>
         ))}
-        {issues.length > room && <Text dimColor>… {issues.length - room} more</Text>}
+        {!fits && <Text dimColor>… {issues.length - shown.length} more</Text>}
         {all.length > 0 && issues.length === 0 && <Text dimColor>No open issue matches the filter.</Text>}
+        {open && (
+          <Box flexDirection="column">
+            <Text dimColor>{'─'.repeat(columns)}</Text>
+            <Box flexDirection="row" columnGap={1}>
+              <Box flexGrow={1}>
+                <Text bold wrap="truncate-end">
+                  #{open.iid} {open.title}
+                </Text>
+              </Box>
+              <Button key="close-preview" hotkey="x" onPress={close}>
+                Close
+              </Button>
+            </Box>
+            {open.labels.length > 0 && (
+              <Text dimColor wrap="truncate-end">
+                {open.labels.join(' · ')}
+              </Text>
+            )}
+            {description ? <Text>{clipped.text}</Text> : <Text dimColor>No description.</Text>}
+            {(clipped.isCut || isExpanded) && (
+              <Button
+                key="expand-preview"
+                plain
+                hotkey="m"
+                onPress={() => void update($, preview, p => ({ ...p, isExpanded: !p.isExpanded }))}
+              >
+                {isExpanded ? 'Show less' : 'Show more'}
+              </Button>
+            )}
+          </Box>
+        )}
       </Box>
     )
   })

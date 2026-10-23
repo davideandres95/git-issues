@@ -16,7 +16,13 @@ const PANE = {
 } as const
 
 const ISSUES = [
-  { iid: 1, title: 'Tidy the loader', updated_at: '2026-10-20T10:00:00Z', labels: ['refactoring'] },
+  {
+    iid: 1,
+    title: 'Tidy the loader',
+    updated_at: '2026-10-20T10:00:00Z',
+    labels: ['refactoring'],
+    description: Array.from({ length: 60 }, (_, n) => `Line ${n + 1} of the description.`).join('\n'),
+  },
   { iid: 2, title: 'Rename helpers', updated_at: '2026-10-20T10:00:00Z', labels: ['refactoring', 'nice-to-have'] },
   { iid: 3, title: 'Fix the crash', updated_at: '2026-10-20T10:00:00Z', labels: ['bugfix'] },
 ]
@@ -165,4 +171,36 @@ test('label toggles include and exclude issues', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: /Fix the crash/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('pressing an issue previews its description under the list, cut until Show more', async ($, on) => {
+  stubSession(on)
+  on('process.run', (_, e) => ({ value: gitlab(e.argv) }))
+  await $.session.start(START)
+  await $.command.run(cmd('all'))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Line 1 of/ })).toBeUndefined()
+
+  await ui.press({ key: 'issue:1' })
+  const cut = await ui.find({ type: 'Text', text: /^Line 1 of/ })
+  expect(cut).toBeDefined()
+  // 20 body rows less the status and label rows leave 18: 9 for the list, 9 for the preview,
+  // of which the rule, the title, the labels and Show more take 4.
+  expect(cut?.text.split('\n').length).toBe(5)
+  expect(cut?.text.endsWith('…')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /Fix the crash/ })).toBeDefined()
+
+  await ui.press({ key: 'expand-preview' })
+  expect((await ui.find({ type: 'Text', text: /^Line 1 of/ }))?.text).toContain('Line 60 of the description.')
+  expect(await ui.find({ type: 'Button', text: /Show less/ })).toBeDefined()
+
+  await ui.press({ key: 'close-preview' })
+  expect(await ui.find({ type: 'Text', text: /Line 1 of/ })).toBeUndefined()
+
+  await ui.press({ key: 'issue:3' })
+  expect(await ui.find({ type: 'Text', text: /No description/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /Show more/ })).toBeUndefined()
+  await ui.press({ key: 'issue:3' })
+  expect(await ui.find({ type: 'Text', text: /No description/ })).toBeUndefined()
+  await ui.unmount()
 })

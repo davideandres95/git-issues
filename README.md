@@ -3,7 +3,9 @@
 A Claude Code mod that keeps a pane beside the chat listing the open issues of the
 current project: number, title and when each was last updated, newest first. Labels
 show as toggles above the list; pressing one cycles it through include, exclude and
-ignore, and `r` refreshes. The list refreshes by itself every five minutes.
+ignore, and `r` refreshes. Pressing an issue shows its description in the lower half of
+the pane, cut to fit with an ellipsis; `m` (Show more) shows it whole, `x` (Close) or
+pressing the issue again closes it. The list refreshes by itself every five minutes.
 
 The forge is picked from the repository's default remote (the current branch's
 upstream remote, else `origin`, else the first remote):
